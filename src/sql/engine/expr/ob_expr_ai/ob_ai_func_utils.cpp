@@ -231,23 +231,49 @@ int ObOpenAIUtils::ObOpenAIEmbed::parse_output(common::ObIAllocator &allocator,
       ret = OB_INVALID_DATA;
     } else {
       ObJsonArray *data_array = static_cast<ObJsonArray *>(data_node);
-      ObJsonNode *embedding_node = nullptr;
-      for (int64_t i = 0; OB_SUCC(ret) && i < data_array->element_count(); i++) {
-        if (OB_ISNULL(embedding_node = data_array->get_value(i))) {
-          ret = OB_INVALID_DATA;
-        } else if (embedding_node->json_type() != ObJsonNodeType::J_OBJECT) {
-          ret = OB_INVALID_DATA;
-        } else {
-          ObJsonObject *embedding_obj = static_cast<ObJsonObject *>(embedding_node);
-          ObJsonNode *embedding = embedding_obj->get_value("embedding");
-          if (OB_ISNULL(embedding)) {
+      const int64_t data_count = data_array->element_count();
+      // The response carries one entry per input together with its `index`.
+      // A provider may return the entries in any order, so place every
+      // embedding at the position requested by `index` and only then emit the
+      // result array in input order.
+      ObSEArray<ObJsonNode *, 8> ordered;
+      if (OB_FAIL(ordered.prepare_allocate(data_count))) {
+      } else {
+        for (int64_t i = 0; OB_SUCC(ret) && i < data_count; i++) {
+          ObJsonNode *embedding_node = data_array->get_value(i);
+          ObJsonObject *embedding_obj = nullptr;
+          ObJsonNode *embedding = nullptr;
+          ObJsonNode *index_node = nullptr;
+          int64_t pos = i;
+          if (OB_ISNULL(embedding_node)
+              || embedding_node->json_type() != ObJsonNodeType::J_OBJECT) {
             ret = OB_INVALID_DATA;
-          } else if (OB_FAIL(result_array->append(embedding))) {
+          } else if (OB_FALSE_IT(embedding_obj = static_cast<ObJsonObject *>(embedding_node))) {
+          } else if (OB_ISNULL(embedding = embedding_obj->get_value("embedding"))) {
+            ret = OB_INVALID_DATA;
+          } else if (OB_NOT_NULL(index_node = embedding_obj->get_value("index"))) {
+            if (index_node->json_type() != ObJsonNodeType::J_INT) {
+              ret = OB_INVALID_DATA;
+            } else {
+              pos = static_cast<ObJsonInt *>(index_node)->get_int();
+            }
+          }
+          if (OB_FAIL(ret)) {
+          } else if (pos < 0 || pos >= data_count || OB_NOT_NULL(ordered.at(pos))) {
+            ret = OB_INVALID_DATA;
+          } else {
+            ordered.at(pos) = embedding;
           }
         }
-      }
-      if (OB_SUCC(ret)) {
-        result = result_array;
+        for (int64_t i = 0; OB_SUCC(ret) && i < data_count; i++) {
+          if (OB_ISNULL(ordered.at(i))) {
+            ret = OB_INVALID_DATA;
+          } else if (OB_FAIL(result_array->append(ordered.at(i)))) {
+          }
+        }
+        if (OB_SUCC(ret)) {
+          result = result_array;
+        }
       }
     }
   }
@@ -1392,47 +1418,9 @@ int ObAIFuncModel::call_dense_embedding(ObString &content, ObJsonObject *config,
 
 int ObAIFuncModel::call_dense_embedding_vector(ObArray<ObString> &contents, ObJsonObject *config, ObArray<ObString> &results)
 {
-  int ret = OB_SUCCESS;
-  ObArray<ObString> headers;
-  ObJsonObject *body = nullptr;
-  ObArray<ObJsonObject *> body_array;
-  ObArray<ObJsonObject *> response_array;
-  ObIJsonBase *result_base = nullptr;
-  ObAIFuncIEmbed *embed_provider = nullptr;
-  ObAIFuncClient client;
-  ObString request_model_name = get_request_model_name();
-  ObString unencrypted_access_key;
-  if (!is_dense_embedding_type()) {
-    ret = OB_INVALID_ARGUMENT;
-    LOG_USER_ERROR(OB_INVALID_ARGUMENT, "ai_embed, info type is not dense embedding");
-  } else if (OB_FAIL(ObAIFuncUtils::get_embed_provider(*allocator_, endpoint_info_.get_provider(), embed_provider))) {
-  } else if (OB_FAIL(endpoint_info_.get_unencrypted_access_key(*allocator_, unencrypted_access_key))) {
-  } else if (OB_FAIL(embed_provider->get_header(*allocator_, unencrypted_access_key, headers))) {
-  } else {
-    for (int i = 0; OB_SUCC(ret) && i < contents.count(); i++) {
-      ObString content = contents[i];
-      ObArray<ObString> content_array;
-      if (OB_FAIL(content_array.push_back(content))) {
-      } else if (OB_FAIL(embed_provider->get_body(*allocator_, request_model_name, content_array, config, body))) {
-      } else if (OB_FAIL(body_array.push_back(body))) {
-      }
-    }
-  }
-
-  if (OB_FAIL(ret)) {
-  } else if (OB_FAIL(client.send_post_batch(*allocator_, endpoint_info_.get_url(), headers, body_array, response_array))) {
-  } else {
-    for (int i = 0; OB_SUCC(ret) && i < response_array.count(); i++) {
-      ObJsonObject *response = response_array[i];
-      ObStringBuffer result_buf(allocator_);
-      if (OB_FAIL(embed_provider->parse_output(*allocator_, response, result_base))) {
-      } else if (OB_FAIL(result_base->print(result_buf, 0))) {
-      } else {
-        results.push_back(result_buf.string());
-      }
-    }
-  }
-  return ret;
+  // All inputs go out in a single request: every provider returns one entry per
+  // input, and the response is reordered by its index field while parsing.
+  return call_dense_embedding_vector_v2(contents, config, results);
 }
 
 
