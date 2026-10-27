@@ -212,6 +212,10 @@ int assign(const ObColumnSchemaV2 &src_schema);
   inline const common::ObString &get_column_name_str() const { return column_name_; }
   inline const char *get_comment() const {return extract_str(comment_);}
   inline const common::ObString &get_comment_str() const { return comment_; }
+  bool is_ai_column() const { return !ai_column_info_.empty(); }
+  const common::ObString &get_ai_column_info() const { return ai_column_info_; }
+  int set_ai_column_info(const common::ObString &info) { return deep_copy_str(info, ai_column_info_); }
+
   inline const common::ObIArray<common::ObString> &get_extended_type_info() const { return extended_type_info_; }
   inline common::ObIArray<common::ObString> &get_extended_type_info() { return extended_type_info_; }
   inline uint64_t get_prev_column_id() const { return prev_column_id_; }
@@ -380,6 +384,7 @@ private:
   common::ObObj cur_default_value_; //collation must be same with the column
   common::ObString column_name_;
   common::ObString comment_;
+  common::ObString ai_column_info_;
   common::ObArrayHelper<common::ObString> extended_type_info_;//used for enum and set
   uint64_t prev_column_id_;
   uint64_t next_column_id_;

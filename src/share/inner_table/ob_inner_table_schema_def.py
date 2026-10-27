@@ -342,7 +342,8 @@ all_column_def = dict(
       ('sub_data_type', 'int', 'false', '0'),
       ('skip_index_attr', 'int', 'false', '0'),
       ('lob_chunk_size', 'int', 'false', 'OB_DEFAULT_LOB_CHUNK_SIZE'),
-      ('local_session_vars', 'longtext', 'true')
+      ('local_session_vars', 'longtext', 'true'),
+      ('ai_column_info', 'longtext', 'true')
   ]
   )
 
@@ -2163,7 +2164,7 @@ def_table_schema(
 
 # __wr_control # removed
 
-# 473 : __all_tenant_event_history 
+# 473 : __all_tenant_event_history
 
 def_table_schema(
   table_name     = '__all_scheduler_job_class',
@@ -2507,6 +2508,20 @@ def_table_schema(**gen_history_table_def(1134, all_objauth_mysql_def))
 # Virtual Table (10000, 20000]
 # Normally, virtual table's index_using_type should be USING_HASH.
 ################################################################################
+
+def_table_schema(
+  owner='database-competition', table_name='__all_ai_column_task', table_id='1999',
+  table_type='SYSTEM_TABLE', gm_columns=['gmt_create','gmt_modified'],
+  rowkey_columns=[('request_id','varchar:64'),('column_id','int')],
+  normal_columns=[('table_id','int','false'),('definition_version','int','false'),
+    ('rowkey_predicate','varchar:4096','false'),('qualified_table_name','varchar:1024','false'),
+    ('normalized_expr','longtext','false'),('result_column_name','varchar:128','false'),
+    ('state_column_name','varchar:128','false'),('request_column_name','varchar:128','false'),
+    ('result_spec_column_name','varchar:128','false'),('result_spec','longtext','false'),
+    ('state','int','false','0'),('retry_count','int','false','0'),('max_retries','int','false','2'),
+    ('eligible_ts','timestamp:6','false'),('lease_owner','varchar:64','true'),('lease_until','timestamp:6','true'),
+    ('result_value','longtext','true'),('last_error','int','true')]
+)
 
 def_table_schema(
   owner = 'bin.lb',
@@ -7354,6 +7369,25 @@ def_table_schema(
   """.replace("\n", " ")
 )
 
+# AI column definitions live with the column schema; this view projects their
+# persisted metadata without a second source of truth.
+def_table_schema(
+  owner='database-competition', table_name='__all_ai_column', table_id='20499',
+  table_type='SYSTEM_VIEW', gm_columns=[], rowkey_columns=[], normal_columns=[],
+  view_definition="""
+    SELECT table_id, column_id, column_name,
+      JSON_UNQUOTE(JSON_EXTRACT(NULLIF(ai_column_info,''),'$.expression')) AS expression,
+      JSON_UNQUOTE(JSON_EXTRACT(NULLIF(ai_column_info,''),'$.normalized_expr')) AS normalized_expr,
+      JSON_UNQUOTE(JSON_EXTRACT(NULLIF(ai_column_info,''),'$.sync_mode')) AS sync_mode,
+      CAST(JSON_UNQUOTE(JSON_EXTRACT(NULLIF(ai_column_info,''),'$.max_retries')) AS SIGNED) AS max_retries,
+      CAST(JSON_UNQUOTE(JSON_EXTRACT(NULLIF(ai_column_info,''),'$.state_column_id')) AS UNSIGNED) AS state_column_id,
+      CAST(JSON_UNQUOTE(JSON_EXTRACT(NULLIF(ai_column_info,''),'$.request_column_id')) AS UNSIGNED) AS request_column_id,
+      CAST(JSON_UNQUOTE(JSON_EXTRACT(NULLIF(ai_column_info,''),'$.result_spec_column_id')) AS UNSIGNED) AS result_spec_column_id,
+      CAST(JSON_UNQUOTE(JSON_EXTRACT(NULLIF(ai_column_info,''),'$.definition_version')) AS UNSIGNED) AS definition_version
+    FROM oceanbase.__all_column WHERE ai_column_info IS NOT NULL AND ai_column_info <> ''
+  """.replace("\n"," ")
+)
+
 # 21000: GV$SESSION_EVENT # removed
 
 # 21001: GV$SESSION_WAIT # removed
@@ -7503,9 +7537,9 @@ def_table_schema(
                       WHERE A.TYPE IN (1, 2, 3)
                         AND C.TABLE_MODE >> 12 & 15 in (0,1)
                         AND C.INDEX_ATTRIBUTES_SET & 16 = 0
-                    
+
                       UNION ALL
-                    
+
                       SELECT
                       CAST(A.ORIGINAL_NAME AS CHAR(128)) AS OWNER,
                       CAST(A.OBJECT_NAME AS CHAR(128)) AS OBJECT_NAME,
@@ -7527,9 +7561,9 @@ def_table_schema(
                       JOIN OCEANBASE.__ALL_DATABASE B
                         ON A.DATABASE_ID = B.DATABASE_ID
                       WHERE A.TYPE = 4
-                    
+
                       UNION ALL
-                    
+
                       SELECT
                       CAST(B.DATABASE_NAME AS CHAR(128)) AS OWNER,
                       CAST(A.OBJECT_NAME AS CHAR(128)) AS OBJECT_NAME,
@@ -8080,9 +8114,9 @@ def_table_schema(
                                where t.table_mode >> 12 & 15 in (0,1) and t.index_attributes_set & 16 = 0) o
                                join oceanbase.__all_dependency d
                                on d.dep_obj_id = o.table_id) v
-                    
+
                          join
-                    
+
                          (select o.database_name as TABLE_SCHEMA,
                                  o.table_name as TABLE_NAME,
                                  d.dep_obj_id as DEP_OBJ_ID,
@@ -8095,7 +8129,7 @@ def_table_schema(
                                 on t.database_id = d.database_id) o
                                 join oceanbase.__all_dependency d
                                 on d.ref_obj_id = o.table_id) t
-                    
+
                         on v.dep_obj_id = t.dep_obj_id and v.ref_obj_id = t.ref_obj_id
                         where (0 = sys_privilege_check('table_acc')
                                 or 0 = sys_privilege_check('table_acc', t.table_schema, v.view_name))
@@ -8292,9 +8326,9 @@ def_table_schema(
                           FROM OCEANBASE.__ALL_VIRTUAL_CORE_ALL_TABLE A
                           JOIN OCEANBASE.__ALL_VIRTUAL_CORE_ALL_TABLE B
                             ON B.TABLE_NAME = '__all_core_table'
-                    
+
                           UNION ALL
-                    
+
                           SELECT
                           GMT_CREATE
                           ,GMT_MODIFIED
@@ -8329,9 +8363,9 @@ def_table_schema(
                           WHERE TABLE_TYPE != 12 AND TABLE_TYPE != 13
                             AND TABLE_MODE >> 12 & 15 in (0,1)
                             AND INDEX_ATTRIBUTES_SET & 16 = 0
-                    
+
                           UNION ALL
-                    
+
                           SELECT
                               CST.GMT_CREATE
                              ,CST.GMT_MODIFIED
@@ -8351,9 +8385,9 @@ def_table_schema(
                              WHERE DB.DATABASE_ID = TBL.DATABASE_ID AND TBL.TABLE_ID = CST.TABLE_ID and CST.CONSTRAINT_TYPE = 1
                               AND TBL.TABLE_MODE >> 12 & 15 in (0,1)
                               AND TBL.INDEX_ATTRIBUTES_SET & 16 = 0
-                    
+
                           UNION ALL
-                    
+
                           SELECT
                           P.GMT_CREATE
                           ,P.GMT_MODIFIED
@@ -8375,9 +8409,9 @@ def_table_schema(
                           FROM OCEANBASE.__ALL_TABLE T JOIN OCEANBASE.__ALL_PART P ON T.TABLE_ID = P.TABLE_ID
                           WHERE T.TABLE_MODE >> 12 & 15 in (0,1)
                           AND P.PARTITION_TYPE = 0 AND T.INDEX_ATTRIBUTES_SET & 16 = 0
-                    
+
                           UNION ALL
-                    
+
                           SELECT
                           SUBP.GMT_CREATE
                           ,SUBP.GMT_MODIFIED
@@ -8400,9 +8434,9 @@ def_table_schema(
                           WHERE T.TABLE_ID =P.TABLE_ID AND P.TABLE_ID=SUBP.TABLE_ID AND P.PART_ID =SUBP.PART_ID
                           AND T.TABLE_MODE >> 12 & 15 in (0,1)
                           AND SUBP.PARTITION_TYPE = 0 AND P.PARTITION_TYPE = 0 AND T.INDEX_ATTRIBUTES_SET & 16 = 0
-                    
+
                           UNION ALL
-                    
+
                           SELECT
                           P.GMT_CREATE
                           ,P.GMT_MODIFIED
@@ -8432,9 +8466,9 @@ def_table_schema(
                           , 0 AS NAMESPACE
                           ,NULL AS EDITION_NAME
                           FROM OCEANBASE.__ALL_PACKAGE P
-                    
+
                           UNION ALL
-                    
+
                           SELECT
                           R.GMT_CREATE
                           ,R.GMT_MODIFIED
@@ -8458,9 +8492,9 @@ def_table_schema(
                           ,NULL AS EDITION_NAME
                           FROM OCEANBASE.__ALL_ROUTINE R
                           WHERE (ROUTINE_TYPE = 1 OR ROUTINE_TYPE = 2)
-                    
+
                           UNION ALL
-                    
+
                           SELECT
                           T.GMT_CREATE
                           ,T.GMT_MODIFIED
@@ -8481,9 +8515,9 @@ def_table_schema(
                           , 0 AS NAMESPACE
                           ,NULL AS EDITION_NAME
                           FROM OCEANBASE.__ALL_TRIGGER T
-                    
+
                           UNION ALL
-                    
+
                           SELECT
                             GMT_CREATE,
                             GMT_MODIFIED,
@@ -8500,7 +8534,7 @@ def_table_schema(
                             0 AS NAMESPACE,
                             NULL AS EDITION_NAME
                           FROM OCEANBASE.__ALL_DATABASE
-                    
+
                         ) A
                         JOIN OCEANBASE.__ALL_DATABASE B
                         ON A.DATABASE_ID = B.DATABASE_ID
@@ -9012,7 +9046,7 @@ def_table_schema(
     CAST(I_T.OWNER AS CHAR(128)) AS OWNER,
     CAST(I_T.INDEX_NAME AS CHAR(128)) AS INDEX_NAME,
     CAST(I_T.TABLE_NAME AS CHAR(128)) AS TABLE_NAME,
-    
+
     CAST(CASE I_T.PART_FUNC_TYPE
          WHEN 0 THEN 'HASH'
          WHEN 1 THEN 'KEY'
@@ -9022,7 +9056,7 @@ def_table_schema(
          WHEN 5 THEN 'LIST'
          WHEN 6 THEN 'LIST COLUMNS'
          WHEN 7 THEN 'RANGE' END AS CHAR(13)) AS PARTITIONING_TYPE,
-    
+
     CAST(CASE WHEN I_T.PART_LEVEL < 2 THEN 'NONE'
          ELSE (CASE I_T.SUB_PART_FUNC_TYPE
                WHEN 0 THEN 'HASH'
@@ -9034,22 +9068,22 @@ def_table_schema(
                WHEN 6 THEN 'LIST COLUMNS'
                WHEN 7 THEN 'RANGE' END)
          END AS CHAR(13)) AS SUBPARTITIONING_TYPE,
-    
+
     CAST(I_T.PART_NUM AS SIGNED) AS PARTITION_COUNT,
-    
+
     CAST(CASE WHEN (I_T.PART_LEVEL < 2 OR I_T.SUB_PART_TEMPLATE_FLAGS = 0) THEN 0
          ELSE I_T.SUB_PART_NUM END AS SIGNED) AS DEF_SUBPARTITION_COUNT,
-    
+
     CAST(PKC.PARTITIONING_KEY_COUNT AS SIGNED) AS PARTITIONING_KEY_COUNT,
     CAST(PKC.SUBPARTITIONING_KEY_COUNT AS SIGNED) AS SUBPARTITIONING_KEY_COUNT,
-    
+
     CAST(CASE I_T.IS_LOCAL WHEN 1 THEN 'LOCAL'
          ELSE 'GLOBAL' END AS CHAR(6)) AS LOCALITY,
-    
+
     CAST(CASE WHEN I_T.IS_LOCAL = 0 THEN 'PREFIXED'
               WHEN (I_T.IS_LOCAL = 1 AND LOCAL_PARTITIONED_PREFIX_INDEX.IS_PREFIXED = 1) THEN 'PREFIXED'
               ELSE 'NON_PREFIXED' END AS CHAR(12)) AS ALIGNMENT,
-    
+
     CAST(NULL AS CHAR(30)) AS DEF_TABLESPACE_NAME,
     CAST(0 AS SIGNED) AS DEF_PCT_FREE,
     CAST(0 AS SIGNED) AS DEF_INI_TRANS,
@@ -9071,7 +9105,7 @@ def_table_schema(
     CAST('NO' AS CHAR(3)) AS AUTOLIST,
     CAST(NULL AS CHAR(1000)) AS INTERVAL_SUBPARTITION,
     CAST(NULL AS CHAR(1000)) AS AUTOLIST_SUBPARTITION
-    
+
     FROM
     (SELECT D.DATABASE_NAME AS OWNER,
             I.TABLE_ID AS INDEX_ID,
@@ -9113,7 +9147,7 @@ def_table_schema(
      AND I.TABLE_MODE >> 12 & 15 in (0,1)
      AND I.INDEX_ATTRIBUTES_SET & 16 = 0
     ) I_T
-    
+
     JOIN
     (SELECT
        TABLE_ID,
@@ -9122,7 +9156,7 @@ def_table_schema(
        FROM OCEANBASE.__ALL_COLUMN
        GROUP BY TABLE_ID) PKC
     ON I_T.JOIN_TABLE_ID = PKC.TABLE_ID
-    
+
     LEFT JOIN
     (
      SELECT I.TABLE_ID AS INDEX_ID,
@@ -9159,7 +9193,7 @@ def_table_schema(
      )
     ) LOCAL_PARTITIONED_PREFIX_INDEX
     ON I_T.INDEX_ID = LOCAL_PARTITIONED_PREFIX_INDEX.INDEX_ID
-    
+
         """
      .replace("\n", " ")
 )
@@ -9414,7 +9448,7 @@ def_table_schema(
                                             SYNC_SCN,
                         READABLE_SCN
                       FROM oceanbase.__all_virtual_server_stat
-                    
+
                     """.replace("\n", " ")
 )
 
@@ -9464,7 +9498,7 @@ def_table_schema(
   gm_columns      = [],
   view_definition = """
                     SELECT
-                    
+
                       ID,
                       USER,
                       HOST,
@@ -11475,7 +11509,7 @@ def_table_schema(
   rowkey_columns = [],
   normal_columns  = [],
   view_definition = """
-                    
+
                         select
                         CAST('def' AS CHAR(64)) AS CONSTRAINT_CATALOG,
                         CAST(cd.database_name AS CHAR(128)) collate utf8mb4_name_case AS CONSTRAINT_SCHEMA,
@@ -11510,9 +11544,9 @@ def_table_schema(
                           AND ct.index_attributes_set & 16 = 0
                           AND (0 = sys_privilege_check('table_acc')
                                OR 0 = sys_privilege_check('table_acc', cd.database_name, ct.table_name))
-                    
+
                         union all
-                    
+
                         select
                         CAST('def' AS CHAR(64)) AS CONSTRAINT_CATALOG,
                         CAST(cd.database_name AS CHAR(128)) collate utf8mb4_name_case AS CONSTRAINT_SCHEMA,
@@ -11547,9 +11581,9 @@ def_table_schema(
                           AND ct.table_type = 3
                           AND (0 = sys_privilege_check('table_acc')
                                OR 0 = sys_privilege_check('table_acc', cd.database_name, ct.table_name))
-                    
+
                         union all
-                    
+
                         select
                         CAST('def' AS CHAR(64)) AS CONSTRAINT_CATALOG,
                         CAST(cd.database_name AS CHAR(128)) collate utf8mb4_name_case AS CONSTRAINT_SCHEMA,

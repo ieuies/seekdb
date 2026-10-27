@@ -18,6 +18,7 @@
 #include "ob_column_schema.h"
 #include "share/schema/ob_schema_service.h"
 
+#include "share/ai_service/ai_column_definition.h"
 namespace oceanbase
 {
 using namespace std;
@@ -82,6 +83,7 @@ int ObColumnSchemaV2::assign(const ObColumnSchemaV2 &src_schema)
     } else if (OB_FAIL(deep_copy_obj(src_schema.cur_default_value_, cur_default_value_))) {
     } else if (OB_FAIL(deep_copy_str(src_schema.column_name_, column_name_))) {
     } else if (OB_FAIL(deep_copy_str(src_schema.comment_, comment_))) {
+    } else if (OB_FAIL(deep_copy_str(src_schema.ai_column_info_, ai_column_info_))) {
     } else if (OB_FAIL(set_extended_type_info(src_schema.extended_type_info_))) {
     } else if (src_schema.column_ref_idxs_ != NULL) {
       if (OB_FAIL(alloc_column_ref_set())) {
@@ -120,6 +122,7 @@ int64_t ObColumnSchemaV2::get_convert_size() const
   convert_size += cur_default_value_.get_deep_copy_size();
   convert_size += column_name_.length() + 1;
   convert_size += comment_.length() + 1;
+  convert_size += ai_column_info_.length() + 1;
   if (column_ref_idxs_ != NULL) {
     convert_size += sizeof(ColumnReferenceSet);
   }
@@ -176,6 +179,7 @@ void ObColumnSchemaV2::reset()
   cur_default_value_.reset();
   column_name_.reset();
   comment_.reset();
+  ai_column_info_.reset();
   column_flags_ = NON_CASCADE_FLAG;
   column_ref_idxs_ = NULL;
   prev_column_id_ = UINT64_MAX;
@@ -238,6 +242,7 @@ OB_DEF_SERIALIZE(ObColumnSchemaV2)
                 local_session_vars_);
   }
 
+  OB_UNIS_ENCODE(ai_column_info_);
   return ret;
 }
 
@@ -297,6 +302,11 @@ OB_DEF_DESERIALIZE(ObColumnSchemaV2)
                 lob_chunk_size_,
                 local_session_vars_);
   }
+  if (OB_SUCC(ret) && pos < data_len) {
+    ObString info;
+    OB_UNIS_DECODE(info);
+    if (OB_SUCC(ret)) { ret = deep_copy_str(info, ai_column_info_); }
+  }
   return ret;
 }
 
@@ -341,6 +351,7 @@ OB_DEF_SERIALIZE_SIZE(ObColumnSchemaV2)
               skip_index_attr_,
               lob_chunk_size_,
               local_session_vars_);
+  OB_UNIS_ADD_LEN(ai_column_info_);
   return len;
 }
 
@@ -566,6 +577,17 @@ int ObColumnSchemaV2::convert_column_id(const hash::ObHashMap<uint64_t, uint64_t
     } else if (OB_FAIL(column_id_map.get_refactored(old_column_id, new_column_id))) {
     } else {
       set_next_column_id(new_column_id);
+    }
+  }
+  if(OB_SUCC(ret)&&is_ai_column()){
+    share::AiColumnDefinition definition;
+    if(!share::AiColumnDefinition::decode(std::string(ai_column_info_.ptr(),ai_column_info_.length()),definition))ret=OB_ERR_UNEXPECTED;
+    else {
+      for(auto &id:definition.dependency_ids){uint64_t mapped=0;OZ (column_id_map.get_refactored(id,mapped));id=mapped;}
+      for(auto *id:{&definition.state_column_id,&definition.request_column_id,&definition.result_spec_column_id}){
+        uint64_t mapped=0;OZ (column_id_map.get_refactored(*id,mapped));*id=mapped;
+      }
+      std::string encoded=definition.encode();OZ (set_ai_column_info(ObString(encoded.size(),encoded.data())));
     }
   }
   return ret;

@@ -5449,6 +5449,7 @@ int ObStaticEngineCG::generate_spec(ObLogSelectInto &op, ObSelectIntoSpec &spec,
 {
   UNUSED(in_root_job);
   ObIAllocator &alloc = phy_plan_->get_allocator();
+  const bool file_copy = op.get_external_properties().prefix_match("seekdb-file-sql-v1:");
   int ret = OB_SUCCESS;
   if (OB_UNLIKELY(1 != op.get_num_of_child())) {
     ret = OB_ERR_UNEXPECTED;
@@ -5458,7 +5459,7 @@ int ObStaticEngineCG::generate_spec(ObLogSelectInto &op, ObSelectIntoSpec &spec,
   } else if (OB_FAIL(deep_copy_obj(alloc, op.get_closed_cht(), spec.closed_cht_))) {
   } else if (OB_FAIL(deep_copy_obj(alloc, op.get_escaped_cht(), spec.escaped_cht_))) {
   } else if (OB_FAIL(spec.external_properties_.store_str(op.get_external_properties()))) {
-  } else if (OB_FAIL(spec.user_vars_.init(op.get_user_vars().count()))) {
+  } else if (OB_FAIL(spec.user_vars_.init(file_copy ? op.get_select_exprs().count() : op.get_user_vars().count()))) {
   } else if (OB_FAIL(spec.select_exprs_.init(op.get_select_exprs().count()))) {
   } else {
     ObString var;
@@ -5466,6 +5467,15 @@ int ObStaticEngineCG::generate_spec(ObLogSelectInto &op, ObSelectIntoSpec &spec,
       var.reset();
       if (OB_FAIL(ob_write_string(alloc, op.get_user_vars().at(i), var))) {
       } else if (OB_FAIL(spec.user_vars_.push_back(var))) {
+      }
+    }
+    if (file_copy && op.get_stmt()->is_select_stmt()) {
+      const auto *select = static_cast<const ObSelectStmt *>(op.get_stmt());
+      for (int64_t i=0;OB_SUCC(ret) && i<select->get_select_item_size();++i) {
+        const auto &item=select->get_select_item(i);
+        ObString name;
+        OZ (ob_write_string(alloc,item.alias_name_.empty()?item.expr_name_:item.alias_name_,name));
+        OZ (spec.user_vars_.push_back(name));
       }
     }
     for (int64_t i = 0; OB_SUCC(ret) && i < op.get_select_exprs().count(); ++i) {
@@ -5503,6 +5513,7 @@ int ObStaticEngineCG::generate_spec(ObLogFunctionTable &op, ObFunctionTableSpec 
   if (OB_ISNULL(op.get_stmt())) {
     ret = OB_ERR_UNEXPECTED;
   } else if (OB_FAIL(spec.column_exprs_.init(op.get_stmt()->get_column_size()))) {
+  } else if (OB_FAIL(spec.file_column_ids_.init(op.get_stmt()->get_column_size()))) {
   } else if (OB_UNLIKELY(op.get_num_of_child() > 1)) {
     ret = OB_ERR_UNEXPECTED;
   } else if (OB_ISNULL(value_raw_expr = op.get_value_expr())) {
@@ -5511,6 +5522,10 @@ int ObStaticEngineCG::generate_spec(ObLogFunctionTable &op, ObFunctionTableSpec 
   } else {
     spec.has_correlated_expr_ = value_raw_expr->has_flag(CNT_DYNAMIC_PARAM);
     spec.value_expr_ = value_expr;
+    if (value_raw_expr->is_const_expr()) {
+      const ObObj &v = static_cast<ObConstRawExpr *>(value_raw_expr)->get_value();
+      spec.file_scan_ = v.is_string_type() && v.get_string().prefix_match("seekdb-file-sql-v1:");
+    }
     for (int64_t i = 0; OB_SUCC(ret) && i < op.get_output_exprs().count(); ++i) {
       if (OB_FAIL(mark_expr_self_produced(op.get_output_exprs().at(i)))) {
       }
@@ -5526,6 +5541,7 @@ int ObStaticEngineCG::generate_spec(ObLogFunctionTable &op, ObFunctionTableSpec 
         OZ (mark_expr_self_produced(col_item->expr_));
         OZ (generate_rt_expr(*col_item->expr_, rt_expr));
         OZ (spec.column_exprs_.push_back(rt_expr));
+        OZ (spec.file_column_ids_.push_back(col_item->column_id_ - OB_APP_MIN_COLUMN_ID));
       }
     }
   }

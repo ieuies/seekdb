@@ -22,6 +22,7 @@
 #define CONST const
 #endif
 #include <iphlpapi.h>
+#include <bcrypt.h>
 #else
 #include <sys/ioctl.h>
 #include <net/if.h>
@@ -111,6 +112,15 @@ int ObUUIDNode::init()
     ret = OB_ERR_UNEXPECTED;
   }
   if (addresses) { free(addresses); }
+  if (ret == OB_ERR_UNEXPECTED) {
+    // Restricted Windows runtimes can hide physical adapters. RFC 4122 allows
+    // a random multicast node when a hardware address is unavailable.
+    if (BCryptGenRandom(nullptr, mac_addr_, sizeof(mac_addr_), BCRYPT_USE_SYSTEM_PREFERRED_RNG) == 0) {
+      mac_addr_[0] |= 0x01;
+      is_inited_ = true;
+      ret = OB_SUCCESS;
+    }
+  }
 #elif defined(__APPLE__)
   // macOS: Use getifaddrs to get network interface information
   struct ifaddrs *ifaddrs_list = nullptr;

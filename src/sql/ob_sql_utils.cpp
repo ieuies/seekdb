@@ -3373,7 +3373,13 @@ bool ObSQLUtils::is_iter_uncommitted_row(ObExecContext *cur_ctx)
 
 bool ObSQLUtils::is_nested_sql(ObExecContext *cur_ctx)
 {
-  return is_pl_nested_sql(cur_ctx) || is_fk_nested_sql(cur_ctx) || is_online_stat_gathering_nested_sql(cur_ctx);
+  // Internal services may enter an explicit nested session without a PL or
+  // foreign-key caller. Such SQL shares its parent's statement transaction.
+  const bool explicit_nested_session = cur_ctx != nullptr &&
+      cur_ctx->get_parent_ctx() != nullptr && cur_ctx->get_my_session() != nullptr &&
+      cur_ctx->get_my_session()->is_nested_session();
+  return explicit_nested_session || is_pl_nested_sql(cur_ctx) ||
+      is_fk_nested_sql(cur_ctx) || is_online_stat_gathering_nested_sql(cur_ctx);
 }
 
 //bind current execute context to my session,

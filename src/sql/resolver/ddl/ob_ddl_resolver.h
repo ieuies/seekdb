@@ -508,6 +508,8 @@ protected:
       bool is_resolve_for_alter_table);
   int resolve_column_name(common::ObString &col_name, ParseNode *node);
   int resolve_column_name(share::schema::ObColumnSchemaV2 &column, ParseNode *node);
+  int resolve_ai_column_definition(share::schema::ObColumnSchemaV2 &column, const ParseNode &node);
+  int finalize_ai_columns(share::schema::ObTableSchema &table, uint64_t &max_column_id);
   int resolve_column_definition(
       share::schema::ObColumnSchemaV2 &column,
       ParseNode *node,

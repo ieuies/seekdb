@@ -1,3 +1,4 @@
+#include "sql/engine/basic/file_scan_utils.h"
 /*
  * Copyright (c) 2025 OceanBase.
  *
@@ -1012,7 +1013,7 @@ int ObSelectResolver::resolve(const ParseNode &parse_tree)
     ret = OB_SIZE_OVERFLOW;
   } else {
     {
-      
+
     }
     /* -----------------------------------------------------------------
      * The later resolve may need some information resolved by the former one,
@@ -1684,6 +1685,7 @@ int ObSelectResolver::expand_target_list(
       tmp_select_item.expr_name_ = col_item.column_name_;
       tmp_select_item.is_real_alias_ = false;
       tmp_select_item.expr_ = col_item.expr_;
+      OZ (record_ai_column_read(col_item.expr_));
       if (OB_FAIL(target_list.push_back(tmp_select_item))) {
       }
     }
@@ -3105,7 +3107,34 @@ int ObSelectResolver::resolve_into_clause(const ParseNode *node)
       new(into_item) ObSelectIntoItem();
       into_item->into_type_ = node->type_;
       if (T_INTO_OUTFILE == node->type_) { // into outfile
-        if (is_in_set_query()) {
+        if (node->value_ == 1 && node->num_child_ == 2) {
+          ObObj enabled;
+          OZ (session_info_->get_sys_variable(SYS_VAR_ENABLE_FILE_SQL, enabled));
+          if (OB_SUCC(ret) && enabled.get_int() == 0) { ret = OB_NOT_SUPPORTED; LOG_USER_ERROR(OB_NOT_SUPPORTED,"file SQL is disabled"); }
+          file_sql::Bound bound;
+          bound.options.path.assign(node->children_[0]->str_value_,node->children_[0]->str_len_);
+          bound.options.header = false;
+          const ParseNode *options = node->children_[1];
+          std::vector<std::string> seen;
+          for (int64_t i = 0; OB_SUCC(ret) && options != nullptr && i < options->num_child_; ++i) {
+            const ParseNode *option = options->children_[i];
+            const ParseNode *key = option->children_[0], *value = option->children_[1];
+            std::string name(key->str_value_,key->str_len_);
+            std::transform(name.begin(),name.end(),name.begin(),::tolower);
+            if (std::find(seen.begin(),seen.end(),name)!=seen.end()) { ret=OB_INVALID_ARGUMENT; break; }
+            seen.push_back(name);
+            std::string text = value && value->str_value_ ? std::string(value->str_value_,value->str_len_) : std::string();
+            if (name=="format" && text=="csv") { }
+            else if (name=="header" && (!value || value->type_==T_BOOL)) bound.options.header=!value || value->value_!=0;
+            else if ((name=="delimiter" || name=="quote" || name=="escape") && value && value->type_==T_VARCHAR && text.size()==1) {
+              if(name=="delimiter")bound.options.delimiter=text[0];else if(name=="quote")bound.options.quote=text[0];else bound.options.escape=text[0];
+            } else if (name=="nullstr" && value && value->type_==T_VARCHAR) bound.options.nullstr=text;
+            else ret=OB_INVALID_ARGUMENT;
+          }
+          std::string payload=file_sql::pack(bound);
+          OZ (ob_write_string(*allocator_,ObString(static_cast<int32_t>(payload.size()),payload.data()),into_item->external_properties_));
+          OZ (resolve_into_const_node(node->children_[0],into_item->outfile_name_));
+        } else if (is_in_set_query()) {
           ret = OB_INAPPROPRIATE_INTO;
         } else if (node->num_child_ == 3 && NULL != node->children_[1]
             && T_EXTERNAL_FILE_FORMAT == node->children_[1]->type_) { // Handle with `FORMAT`
@@ -3231,6 +3260,9 @@ int ObSelectResolver::resolve_column_ref_expr(
   }
   if (OB_SUCC(ret) && OB_FAIL(resolve_column_ref_in_all_namespace(q_name, real_ref_expr))) {
     LOG_WARN_IGNORE_COL_NOTFOUND(ret, "resolve column ref in all namespace failed", K(ret));
+  }
+  if (OB_SUCC(ret) && OB_FAIL(record_ai_column_read(real_ref_expr))) {
+    LOG_WARN("record AI column read failed", K(ret));
   }
   return ret;
 }

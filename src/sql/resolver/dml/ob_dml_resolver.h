@@ -203,6 +203,7 @@ public:
   int resolve_generate_table_item(ObSelectStmt *ref_query, const ObString &alias_name, TableItem *&tbl_item);
   int resolve_joined_table(const ParseNode &parse_node, JoinedTable *&joined_table);
   int resolve_joined_table_item(const ParseNode &parse_node, JoinedTable *&joined_table);
+  int resolve_file_table_item(const ParseNode &parse_tree, TableItem *&tbl_item);
   int resolve_function_table_item(const ParseNode &table_node,
                                   TableItem *&table_item);
   int resolve_json_table_item(const ParseNode &table_node,
@@ -293,6 +294,7 @@ public:
                                             const TableItem &table_item, // table_item of dml table(child_table)
                                             const ObTableSchema &parent_table_schema,
                                             const ObForeignKeyInfo *fk_info);
+  int record_ai_column_read(ObRawExpr *expr);
   virtual int resolve_column_ref_expr(const ObQualifiedName &q_name, ObRawExpr *&real_ref_expr);
   int resolve_sql_expr(const ParseNode &node, ObRawExpr *&expr,
                        ObArray<ObQualifiedName> *input_columns = NULL);

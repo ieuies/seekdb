@@ -34,6 +34,8 @@
 #include "sql/engine/ob_batch_rows.h"
 #include "sql/engine/ob_physical_plan.h"
 #include "query/vector/ob_vector_index_util.h"
+#include "sql/engine/dml/ai_column_dml.h"
+
 namespace oceanbase
 {
 using namespace common;
@@ -632,6 +634,7 @@ int ObDMLService::process_insert_row(const ObInsCtDef &ins_ctdef,
     }
 
   }
+  if (OB_SUCC(ret) && !is_skipped) ret=AiColumnDml::process(ins_ctdef,dml_op,true);
   return ret;
 }
 
@@ -734,6 +737,7 @@ int ObDMLService::process_delete_row(const ObDelCtDef &del_ctdef,
                "old_row", ROWEXPR2STR(dml_op.get_eval_ctx(), del_ctdef.old_row_));
   }
 
+  if (OB_SUCC(ret) && !is_skipped) ret=AiColumnDml::process(del_ctdef,dml_op,false,true);
   return ret;
 }
 
@@ -832,6 +836,7 @@ int ObDMLService::process_update_row(const ObUpdCtDef &upd_ctdef,
                 "old_row", ROWEXPR2STR(dml_op.get_eval_ctx(), upd_ctdef.old_row_),
                 "new_row", ROWEXPR2STR(dml_op.get_eval_ctx(), upd_ctdef.new_row_));
   }
+  if (OB_SUCC(ret) && !is_skipped && upd_rtdef.is_row_changed_) ret=AiColumnDml::process(upd_ctdef,dml_op,false);
   return ret;
 }
 

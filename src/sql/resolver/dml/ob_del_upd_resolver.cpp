@@ -24,6 +24,7 @@
 #include "sql/parser/parse_malloc.h"
 #include "query/vector/ob_vector_index_util.h"
 #include "sql/das/ob_domain_id.h"
+#include "share/ai_service/ai_column_definition.h"
 
 namespace oceanbase
 {
@@ -122,6 +123,11 @@ int ObDelUpdResolver::resolve_assignments(const ParseNode &parse_node,
       if (OB_SUCC(ret) && T_INSERT_SCOPE == scope) {
         if (OB_FAIL(mock_values_column_ref(ref_expr))) {
         }
+      }
+      if(OB_SUCC(ret)&&!session_info_->is_inner()&&table&&table->is_basic_table()){
+        const ObTableSchema *schema=nullptr;OZ (schema_checker_->get_table_schema(table->ref_id_,schema));
+        const auto *target=schema?schema->get_column_schema(ref_expr->get_column_id()):nullptr;
+        if(OB_SUCC(ret)&&target&&target->is_ai_column()){ret=OB_NOT_SUPPORTED;LOG_USER_ERROR(OB_NOT_SUPPORTED,"assigning AI column results directly");}
       }
       // process expression
       if (OB_SUCC(ret)) {
@@ -518,6 +524,21 @@ int ObDelUpdResolver::resolve_additional_assignments(ObIArray<ObTableAssignment>
                                                                  assigns.at(i).assignments_,
                                                                  update_with_vector_index))) {
     } else {
+      // Dependency updates invalidate AI vectors just as an explicit vector
+      // assignment does. Include native vector-ID maintenance in this plan.
+      for(auto iter=table_schema->column_begin();OB_SUCC(ret)&&iter!=table_schema->column_end();++iter){
+        const auto *column=*iter;
+        if(column->is_ai_column()&&column->is_collection()){
+          share::AiColumnDefinition definition;const auto &info=column->get_ai_column_info();
+          if(!share::AiColumnDefinition::decode(std::string(info.ptr(),info.length()),definition))ret=OB_ERR_UNEXPECTED;
+          else for(int64_t j=0;j<assigns.at(i).assignments_.count();++j){
+            const uint64_t id=assigns.at(i).assignments_.at(j).column_expr_->get_column_id();
+            const auto *assigned=table_schema->get_column_schema(id);
+            if(id==definition.request_column_id||(assigned&&assigned->get_rowkey_position()>0))update_with_vector_index=true;
+            for(auto dependency:definition.dependency_ids)if(dependency==id)update_with_vector_index=true;
+          }
+        }
+      }
       for (ObTableSchema::const_column_iterator iter = table_schema->column_begin();
           (OB_SUCCESS == ret && iter != table_schema->column_end()); ++iter) {
         ColumnItem *col_item = NULL;
@@ -563,8 +584,40 @@ int ObDelUpdResolver::resolve_additional_assignments(ObIArray<ObTableAssignment>
                                            col_item->expr_->get_dependant_expr(),
                                            assignment.expr_))) {
               }
-            } else if (trigger_exist) {
+            } else if (trigger_exist || column_schema->is_ai_column() ||
+                       column_schema->get_column_name_str().prefix_match("__ai_")) {
               assignment.expr_ = col_item->expr_;
+              if (column_schema->is_ai_column() && column_schema->is_collection()) {
+                share::AiColumnDefinition definition;
+                const auto &info = column_schema->get_ai_column_info();
+                if (!share::AiColumnDefinition::decode(std::string(info.ptr(), info.length()), definition)) {
+                  ret = OB_ERR_UNEXPECTED;
+                }
+                ObRawExpr *unchanged = nullptr;
+                for (int64_t j = 0; OB_SUCC(ret) && j < assigns.at(i).assignments_.count(); ++j) {
+                  const auto &candidate = assigns.at(i).assignments_.at(j);
+                  const uint64_t id = candidate.column_expr_->get_column_id();
+                  const auto *assigned = table_schema->get_column_schema(id);
+                  bool affects = id == definition.request_column_id ||
+                      (assigned && assigned->get_rowkey_position() > 0);
+                  for (uint64_t dependency : definition.dependency_ids) affects |= dependency == id;
+                  if (affects) {
+                    ObRawExpr *equal = nullptr;
+                    OZ (ObRawExprUtils::build_common_binary_op_expr(*params_.expr_factory_, T_OP_NSEQ,
+                        candidate.column_expr_, candidate.expr_, equal));
+                    if (unchanged == nullptr) unchanged = equal;
+                    else OZ (ObRawExprUtils::build_common_binary_op_expr(*params_.expr_factory_, T_OP_AND,
+                        unchanged, equal, unchanged));
+                  }
+                }
+                if (OB_SUCC(ret) && unchanged != nullptr) {
+                  ObRawExpr *null_value = nullptr;
+                  OZ (ObRawExprUtils::build_null_expr(*params_.expr_factory_, null_value));
+                  OZ (ObRawExprUtils::build_case_when_expr(*params_.expr_factory_, unchanged,
+                      col_item->expr_, null_value, assignment.expr_));
+                  OZ (assignment.expr_->formalize(session_info_));
+                }
+              }
             }
             if (OB_FAIL(ret)) {
               //do nothing
@@ -656,7 +709,16 @@ int ObDelUpdResolver::add_assignment(common::ObIArray<ObTableAssignment> &assign
       table_assign = &assigns.at(assigns.count() - 1);
     }
   }
-  if (OB_SUCC(ret) && !params_.is_prepare_stage_) {
+  bool preserve_ai_old_values = false;
+  if (OB_SUCC(ret) && assign.is_implicit_ && table_item->is_basic_table()) {
+    const ObTableSchema *table_schema = nullptr;
+    OZ (schema_checker_->get_table_schema(table_item->ref_id_, table_schema));
+    const auto *column = table_schema ? table_schema->get_column_schema(assign.column_expr_->get_column_id()) : nullptr;
+    preserve_ai_old_values = column && column->is_ai_column();
+  }
+  // AI invalidation compares original dependencies with their assigned values.
+  // Replacing its original references would turn each comparison into x <=> x.
+  if (OB_SUCC(ret) && !params_.is_prepare_stage_ && !preserve_ai_old_values) {
     //in MySQL:
     //The second assignment in the following statement sets col2 to the current (updated) col1 value,
     //not the original col1 value.
@@ -728,7 +790,8 @@ int ObDelUpdResolver::check_need_assignment(const common::ObIArray<ObAssignment>
         need_assign = true;
       }
     }
-  } else if (column.is_on_update_current_timestamp() || before_update_row_trigger_exist) {
+  } else if (column.is_on_update_current_timestamp() || before_update_row_trigger_exist ||
+             column.is_ai_column() || column.get_column_name_str().prefix_match("__ai_")) {
     if (column.get_column_id() == OB_HIDDEN_PK_INCREMENT_COLUMN_ID) {
       // for heap_table the hidden_pk should not be updated
     } else if (OB_FAIL(ObResolverUtils::check_whether_assigned(stmt, assigns, table_id, column.get_column_id(), exist))) {
@@ -2171,6 +2234,11 @@ int ObDelUpdResolver::resolve_insert_columns(const ParseNode *node,
         ret = OB_NOT_SUPPORTED;
         LOG_USER_ERROR(OB_NOT_SUPPORTED, "specify __sess_create_time value");
       } else if (OB_FAIL(mock_values_column_ref(column_expr))) {
+      }
+      if(OB_SUCC(ret)&&!session_info_->is_inner()&&table_item->is_basic_table()){
+        const ObTableSchema *schema=nullptr;OZ (schema_checker_->get_table_schema(table_item->ref_id_,schema));
+        const auto *target=schema?schema->get_column_schema(column_expr->get_column_id()):nullptr;
+        if(OB_SUCC(ret)&&target&&target->is_ai_column()){ret=OB_NOT_SUPPORTED;LOG_USER_ERROR(OB_NOT_SUPPORTED,"assigning AI column results directly");}
       }
     }//end for
   } else {

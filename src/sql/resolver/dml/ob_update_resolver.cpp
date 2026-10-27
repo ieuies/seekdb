@@ -16,6 +16,8 @@
 
 #define USING_LOG_PREFIX SQL_RESV
 #include "sql/resolver/dml/ob_update_resolver.h"
+#include "share/ai_service/ai_column_definition.h"
+#include <functional>
 
 namespace oceanbase
 {
@@ -58,6 +60,13 @@ int ObUpdateResolver::resolve(const ParseNode &parse_tree)
     }
   }
 
+  // MySQL's trailing statement action stores placeholder count in value_.
+  // Keep the RETRY marker in its unused error-logging child instead.
+  const ParseNode *ai_marker = parse_tree.num_child_ > 10 ? parse_tree.children_[10] : nullptr;
+  const int ai_action = ai_marker && ai_marker->type_ == T_INT &&
+      (ai_marker->value_ == 60001 || ai_marker->value_ == 60002)
+      ? static_cast<int>(ai_marker->value_ - 60000) : 0;
+  if(ai_action==2){LOG_USER_ERROR(OB_NOT_SUPPORTED,"combining AI COLUMN RETRY with another ALTER action");return OB_NOT_SUPPORTED;}
   // resolve outline data hints first
   if (OB_SUCC(ret)) {
     if (OB_FAIL(resolve_outline_data_hints())) {
@@ -77,6 +86,36 @@ int ObUpdateResolver::resolve(const ParseNode &parse_tree)
     }
   }
 
+  if(OB_SUCC(ret) && ai_action==1){
+    auto *name=parse_tree.children_[UPDATE_LIST]->children_[0]->children_[0]->children_[2];
+    const ObTableSchema *table=nullptr;
+    if(update_stmt->get_table_items().count()!=1)ret=OB_NOT_SUPPORTED;
+    else ret=schema_checker_->get_table_schema(update_stmt->get_table_items().at(0)->ref_id_,table);
+    const ObColumnSchemaV2 *column=OB_SUCC(ret)&&table?table->get_column_schema(ObString(name->str_len_,name->str_value_)):nullptr;
+    share::AiColumnDefinition definition;
+    if(OB_SUCC(ret)&&(!column||!column->is_ai_column())){LOG_USER_ERROR(OB_NOT_SUPPORTED,"retrying a column that is not an AI column");return OB_NOT_SUPPORTED;}
+    if(OB_SUCC(ret)){
+      const auto &info=column->get_ai_column_info();
+      if(!share::AiColumnDefinition::decode(std::string(info.ptr(),info.length()),definition))ret=OB_ERR_UNEXPECTED;
+      else {
+        const auto &request=table->get_column_schema(definition.request_column_id)->get_column_name_str();
+        name->str_value_=request.ptr();name->str_len_=request.length();
+        const auto &state=table->get_column_schema(definition.state_column_id)->get_column_name_str();
+        ColumnItem *request_item=nullptr,*state_item=nullptr;
+        OZ (resolve_basic_column_item(*update_stmt->get_table_items().at(0),request,true,request_item));
+        OZ (resolve_basic_column_item(*update_stmt->get_table_items().at(0),state,true,state_item));
+        std::function<void(ParseNode*)> rewrite=[&](ParseNode *node){
+          if(!node)return;
+          if(node->type_==T_COLUMN_REF&&node->num_child_==3&&node->children_[2]){
+            auto *id=node->children_[2];
+            if(!id->is_input_quoted_&&ObString(id->str_len_,id->str_value_).case_compare("status")==0){id->str_value_=state.ptr();id->str_len_=state.length();}
+          }
+          for(int i=0;i<node->num_child_;++i)rewrite(node->children_[i]);
+        };
+        rewrite(parse_tree.children_[WHERE]);
+      }
+    }
+  }
   if (OB_SUCC(ret)) {
     current_scope_ = T_UPDATE_SCOPE;
     // resolve assignments
@@ -180,8 +219,11 @@ int ObUpdateResolver::try_add_remove_const_expr_for_assignments()
           ObAssignment &assign = assignments.at(i);
           if (OB_ISNULL(assign.expr_) || OB_ISNULL(assign.column_expr_)) {
             ret = OB_ERR_UNEXPECTED;
-          } else if (assign.expr_->is_const_expr() &&
-                     is_parent_col_self_ref_fk(assign.column_expr_->get_column_id(), fk_infos)) {
+          } else if ((assign.expr_->is_const_expr() &&
+                     is_parent_col_self_ref_fk(assign.column_expr_->get_column_id(), fk_infos)) ||
+                     assign.column_expr_->get_column_name().prefix_match("__ai_")) {
+            // AI DML replaces these values per row; never overwrite a shared
+            // constant frame (in particular the RETRY marker).
             ObRawExpr *new_expr = NULL;
             if (OB_FAIL(ObRawExprUtils::build_remove_const_expr(*params_.expr_factory_,
                                                                 *session_info_,

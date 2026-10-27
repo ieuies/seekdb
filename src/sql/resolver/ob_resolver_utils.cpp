@@ -17,6 +17,7 @@
 #define USING_LOG_PREFIX SQL_RESV
 
 #include "config_bridge.h"
+#include "sql/engine/basic/file_scan_utils.h"
 #include "share/config/ob_config_helper.h"
 #include "sql/resolver/cmd/ob_load_data_stmt.h"
 
@@ -121,6 +122,17 @@ int ObResolverUtils::get_all_function_table_column_names(const TableItem &table_
                                                          ObIArray<ObString> &column_names)
 {
   int ret = OB_SUCCESS;
+  if(table_item.function_table_expr_&&table_item.function_table_expr_->is_const_expr()){
+    const ObObj &value=static_cast<const ObConstRawExpr*>(table_item.function_table_expr_)->get_value();
+    if(value.is_string_type()){
+      const auto &text=value.get_string();file_sql::Bound bound;
+      if(file_sql::unpack(std::string(text.ptr(),text.length()),bound)){
+        const auto columns=bound.describe?file_sql::describe_columns():bound.columns;
+        for(const auto &column:columns){ObString name;OZ (ob_write_string(*params.allocator_,ObString(column.name.size(),column.name.data()),name));OZ (column_names.push_back(name));}
+        return ret;
+      }
+    }
+  }
   ObRawExpr *table_expr = NULL;
   ObPLPackageGuard *package_guard = nullptr;
   const ObUserDefinedType *user_type = NULL;

@@ -405,6 +405,8 @@ END_P SET_VAR DELIMITER
 %type <node> opt_limit_clause limit_expr opt_lock_type opt_for_update opt_for_update_wait opt_lock_in_share_mode
 %type <node> sort_list sort_key opt_asc_desc sort_list_for_group_by sort_key_for_group_by opt_asc_desc_for_group_by sort_list_opt_null sort_key_opt_null opt_asc_desc_null
 %type <node> opt_query_expression_option_list query_expression_option_list query_expression_option opt_distinct opt_distinct_or_all opt_separator projection
+%type <node> opt_ai_column_options
+%type <node> file_copy_stmt file_copy_target file_copy_options file_copy_option file_copy_option_list
 %type <node> from_list table_references table_reference table_factor normal_relation_factor dot_relation_factor relation_factor
 %type <node> relation_factor_in_hint relation_factor_in_hint_list relation_factor_in_pq_hint opt_relation_factor_in_hint_list relation_factor_in_use_join_hint_list
 %type <node> relation_factor_in_leading_hint_list joined_table tbl_name table_subquery table_subquery_alias
@@ -556,6 +558,7 @@ opt_end_p:
 /* only preparable statement will set question mark size */
 stmt:
     select_stmt             { $$ = $1; question_mark_issue($$, result); }
+  | file_copy_stmt          { $$ = $1; question_mark_issue($$, result); }
   | insert_stmt             { $$ = $1; question_mark_issue($$, result); }
   | create_table_stmt       {
     $$ = $1;
@@ -4849,6 +4852,14 @@ column_definition_ref data_type opt_column_attribute_list opt_column_reference o
   merge_nodes(attributes, result, T_COLUMN_ATTRIBUTES, $10);
   malloc_non_terminal_node($$, result->malloc_pool_, T_COLUMN_DEFINITION, 7, $1, $2, attributes, $7, $9, $12, $4);
 }
+| column_definition_ref data_type AI COLUMN '(' expr ')' opt_ai_column_options opt_position_column
+{
+  dup_expr_string($6, result, @6.first_column, @6.last_column);
+  ParseNode *attributes = NULL;
+  set_data_type_collation($2, attributes, false, true);
+  malloc_non_terminal_node($$, result->malloc_pool_, T_COLUMN_DEFINITION, 6, $1, $2, NULL, $9, $6, $8);
+  $$->value_ = 1;
+}
 | column_definition_ref SERIAL opt_column_attribute_list opt_position_column 
 {
   ParseNode *unsigned_bigint_type = NULL;
@@ -4875,6 +4886,11 @@ column_definition_ref data_type opt_column_attribute_list opt_column_reference o
   merge_nodes(attributes, result, T_COLUMN_ATTRIBUTES, attributes);
   malloc_non_terminal_node($$, result->malloc_pool_, T_COLUMN_DEFINITION, 4, $1, unsigned_bigint_type, attributes, $4);
 }
+;
+
+opt_ai_column_options:
+/* empty */ { $$ = NULL; }
+| WITH '(' expr_list ')' { $$ = $3; }
 ;
 
 constraint_definition:
@@ -8903,6 +8919,47 @@ LIMIT limit_expr OFFSET limit_expr
 }
 ;
 
+file_copy_stmt:
+COPY file_copy_target TO STRING_VALUE file_copy_options
+{
+  ParseNode *into = NULL;
+  malloc_non_terminal_node(into, result->malloc_pool_, T_INTO_OUTFILE, 2, $4, $5);
+  into->value_ = 1;into->is_tree_not_param_=true;
+  $$ = $2;
+  if ($$->type_ != T_SELECT || $$->children_[PARSE_SELECT_INTO] != NULL) { yyerror(&@2, result, "invalid COPY query"); YYERROR; }
+  $$->children_[PARSE_SELECT_INTO] = into;
+}
+;
+file_copy_target:
+select_with_parens { $$ = $1; }
+| relation_factor
+{
+  ParseNode *table = NULL, *from = NULL, *star = NULL, *project = NULL, *list = NULL;
+  malloc_non_terminal_node(table, result->malloc_pool_, T_ORG, 4, $1, NULL, NULL, NULL);
+  merge_nodes(from, result, T_FROM_LIST, table);
+  malloc_terminal_node(star, result->malloc_pool_, T_STAR);
+  dup_string_to_node(star, result->malloc_pool_, "*");
+  malloc_non_terminal_node(project, result->malloc_pool_, T_PROJECT_STRING, 1, star);
+  merge_nodes(list, result, T_PROJECT_LIST, project);
+  malloc_select_node($$, result->malloc_pool_);
+  $$->children_[PARSE_SELECT_FROM] = from;
+  $$->children_[PARSE_SELECT_SELECT] = list;
+}
+;
+file_copy_options:
+/* empty */ { $$ = NULL; }
+| '(' file_copy_option_list ')' { merge_nodes($$, result, T_EXPR_LIST, $2); }
+;
+file_copy_option_list:
+file_copy_option { $$ = $1; }
+| file_copy_option_list ',' file_copy_option { malloc_non_terminal_node($$, result->malloc_pool_, T_LINK_NODE, 2, $1, $3); }
+;
+file_copy_option:
+relation_name { malloc_non_terminal_node($$, result->malloc_pool_, T_OP_EQ, 2, $1, NULL); }
+| relation_name literal { malloc_non_terminal_node($$, result->malloc_pool_, T_OP_EQ, 2, $1, $2); }
+| relation_name relation_name { malloc_non_terminal_node($$, result->malloc_pool_, T_OP_EQ, 2, $1, $2); }
+;
+
 into_clause:
 INTO OUTFILE STRING_VALUE opt_charset field_opt line_opt file_opt
 {
@@ -10788,7 +10845,31 @@ table_factor
 ;
 
 table_factor:
-tbl_name
+NAME_OB '(' expr_list ')' %prec LOWER_PARENS
+{
+  ParseNode *args = NULL;
+  args = $3;
+  args->is_tree_not_param_ = true;
+  malloc_non_terminal_node($$, result->malloc_pool_, T_TABLE_COLLECTION_EXPRESSION, 3, $1, args, NULL);
+  $$->value_ = 1;
+}
+| NAME_OB '(' expr_list ')' relation_name
+{
+  ParseNode *args = NULL;
+  args = $3;
+  args->is_tree_not_param_ = true;
+  malloc_non_terminal_node($$, result->malloc_pool_, T_TABLE_COLLECTION_EXPRESSION, 3, $1, args, $5);
+  $$->value_ = 1;
+}
+| NAME_OB '(' expr_list ')' AS relation_name
+{
+  ParseNode *args = NULL;
+  args = $3;
+  args->is_tree_not_param_ = true;
+  malloc_non_terminal_node($$, result->malloc_pool_, T_TABLE_COLLECTION_EXPRESSION, 3, $1, args, $6);
+  $$->value_ = 1;
+}
+| tbl_name
 {
   $$ = $1;
 }
@@ -12265,7 +12346,14 @@ explain_or_desc relation_factor opt_desc_column_option
   malloc_non_terminal_node($$, result->malloc_pool_, T_SHOW_COLUMNS, 4, $$, $2, NULL, $3);
 }
 
-| explain_or_desc explainable_stmt { GEN_EXPLAN_STMT($1, $$, 0, 0, $2, NULL, NULL);}
+| explain_or_desc explainable_stmt {
+  ParseNode *from = $2->type_ == T_SELECT ? $2->children_[PARSE_SELECT_FROM] : NULL;
+  if ($1 != NULL && from != NULL && from->num_child_ == 1 &&
+      from->children_[0]->type_ == T_TABLE_COLLECTION_EXPRESSION && from->children_[0]->value_ == 1) {
+    from->children_[0]->value_ = 2;
+    $$ = $2;
+  } else { GEN_EXPLAN_STMT($1, $$, 0, 0, $2, NULL, NULL); }
+}
 | explain_or_desc PRETTY explainable_stmt { GEN_EXPLAN_STMT($1, $$, 0, T_PRETTY, $3, NULL, NULL);}
 | explain_or_desc PRETTY_COLOR explainable_stmt { GEN_EXPLAN_STMT($1, $$, 0, T_PRETTY_COLOR, $3, NULL, NULL);}
 
@@ -12306,8 +12394,8 @@ explain_or_desc relation_factor opt_desc_column_option
 
 explain_or_desc:
 EXPLAIN {$$ = NULL;}
-| DESCRIBE {$$ = NULL;}
-| DESC  {$$ = NULL;}
+| DESCRIBE { malloc_terminal_node($$, result->malloc_pool_, T_INT); $$->value_ = 1; }
+| DESC  { malloc_terminal_node($$, result->malloc_pool_, T_INT); $$->value_ = 1; }
 ;
 
 explainable_stmt:
@@ -14653,7 +14741,28 @@ relation_factor TO relation_factor
  *
  *****************************************************************************/
 alter_table_stmt:
-alter_with_opt_hint TABLE relation_factor alter_table_actions
+alter_with_opt_hint TABLE relation_factor NAME_OB AI COLUMN column_name opt_where
+{
+  if ($4->str_len_ != 5 || strncasecmp($4->str_value_, "retry", 5) != 0) { yyerror(NULL,result,"Expected RETRY"); YYABORT; }
+  ParseNode *table=NULL,*tables=NULL,*column=NULL,*marker=NULL,*assignment=NULL,*assignments=NULL;
+  malloc_non_terminal_node(table,result->malloc_pool_,T_ORG,4,$3,NULL,NULL,NULL);
+  malloc_non_terminal_node(tables,result->malloc_pool_,T_TABLE_REFERENCES,1,table);
+  malloc_non_terminal_node(column,result->malloc_pool_,T_COLUMN_REF,3,NULL,NULL,$7);
+  malloc_terminal_node(marker,result->malloc_pool_,T_VARCHAR);
+  marker->str_value_="__ai_retry__";marker->str_len_=12;marker->is_hidden_const_=true;marker->is_tree_not_param_=true;
+  malloc_non_terminal_node(assignment,result->malloc_pool_,T_ASSIGN_ITEM,2,column,marker);
+  malloc_non_terminal_node(assignments,result->malloc_pool_,T_ASSIGN_LIST,1,assignment);
+  malloc_non_terminal_node($$,result->malloc_pool_,T_UPDATE,11,NULL,tables,assignments,$8,NULL,NULL,NULL,$1,NULL,NULL,NULL);
+  malloc_terminal_node($$->children_[10],result->malloc_pool_,T_INT);
+  $$->children_[10]->value_=60001;$$->children_[10]->is_hidden_const_=true;$$->children_[10]->is_tree_not_param_=true;
+}
+| alter_with_opt_hint TABLE relation_factor NAME_OB AI COLUMN column_name opt_where ',' alter_table_actions
+{
+  malloc_non_terminal_node($$,result->malloc_pool_,T_UPDATE,11,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL);
+  malloc_terminal_node($$->children_[10],result->malloc_pool_,T_INT);
+  $$->children_[10]->value_=60002;$$->children_[10]->is_hidden_const_=true;$$->children_[10]->is_tree_not_param_=true;
+}
+| alter_with_opt_hint TABLE relation_factor alter_table_actions
 {
   ParseNode *table_actions = NULL;
   merge_nodes(table_actions, result, T_ALTER_TABLE_ACTION_LIST, $4);

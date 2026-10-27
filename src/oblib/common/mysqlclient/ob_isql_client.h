@@ -93,11 +93,15 @@ public:
     template <typename T, typename... Args>
     int create_handler(T *&res, Args &... args)
     {
-      static_assert(sizeof(T) <= sizeof(buf_), "buffer not enough");
+      static_assert(sizeof(T) + alignof(T) - 1 <= sizeof(buf_), "buffer not enough for aligned handler");
       if (NULL != result_handler_) {
         reset();
       }
-      res = new (buf_) T(args...);
+      // Handlers can contain SIMD-aligned members even though ReadResult's
+      // byte buffer has only the enclosing class's natural alignment.
+      const uintptr_t address = (reinterpret_cast<uintptr_t>(buf_) + alignof(T) - 1)
+                              & ~(static_cast<uintptr_t>(alignof(T)) - 1);
+      res = new (reinterpret_cast<void *>(address)) T(args...);
       result_handler_ = res;
       return common::OB_SUCCESS;
     }

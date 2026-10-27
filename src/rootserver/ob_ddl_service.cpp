@@ -7448,6 +7448,7 @@ int ObDDLService::fill_new_column_attributes(
     new_column_schema.set_autoincrement(alter_column_schema.is_autoincrement());
     new_column_schema.set_column_flags(alter_column_schema.get_column_flags());
     new_column_schema.set_comment(alter_column_schema.get_comment_str());
+    OZ (new_column_schema.set_ai_column_info(alter_column_schema.get_ai_column_info()));
     new_column_schema.set_schema_version(new_schema_version);
     new_column_schema.set_on_update_current_timestamp(
         alter_column_schema.is_on_update_current_timestamp());

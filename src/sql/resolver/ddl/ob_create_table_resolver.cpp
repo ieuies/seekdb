@@ -951,6 +951,9 @@ int ObCreateTableResolver::resolve_table_elements(const ParseNode *node,
       }
     }
   }
+  if (OB_SUCC(ret) && resolve_rule != RESOLVE_NON_COL) {
+    ret = finalize_ai_columns(static_cast<ObCreateTableStmt*>(stmt_)->get_create_table_arg().schema_,cur_column_id_);
+  }
   return ret;
 }
 

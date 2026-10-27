@@ -126,7 +126,8 @@ public:
       external_properties_(),
       format_type_(ObExternalFileFormat::FormatType::CSV_FORMAT),
       block_id_(0),
-      need_commit_(true)
+      need_commit_(true),
+      file_copy_state_(nullptr)
   {
   }
 
@@ -193,6 +194,13 @@ public:
   virtual int inner_get_next_row() override;
   virtual int inner_get_next_batch(const int64_t max_row_cnt) override;
   virtual void destroy() override;
+  int open_file_copy();
+  int file_copy_row();
+  int file_copy_finish();
+  int file_copy_next();
+  int file_copy_batch(int64_t size);
+  void close_file_copy();
+
 
 private:
   int init_env_common();
@@ -292,6 +300,7 @@ private:
   ObExternalFileFormat::FormatType format_type_;
   uint32_t block_id_;
   bool need_commit_;
+  void *file_copy_state_;
   static const int64_t SHARED_BUFFER_SIZE = 2LL * 1024 * 1024;
 
 };

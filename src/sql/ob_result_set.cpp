@@ -28,6 +28,9 @@
 #include "sql/engine/table/ob_table_scan_op.h"
 #include "share/ob_ddl_checksum.h"
 
+#include "share/ai_service/ai_column_definition.h"
+#include "sql/session/ai_column_sql.h"
+#include "common/mysqlclient/ob_isql_connection.h"
 using namespace oceanbase::sql;
 using namespace oceanbase::common;
 using namespace oceanbase::share;
@@ -441,6 +444,45 @@ bool ObResultSet::transaction_set_violation_and_retry(int &err, int64_t &retry_t
   return bret;
 }
 
+namespace oceanbase { namespace sql {
+static int check_ai_column_reads(ObExecContext &ctx,const ObPhysicalPlan &plan)
+{
+  int ret=OB_SUCCESS;auto *session=ctx.get_my_session();ObObj strict;
+  if(!session||session->is_inner()||plan.ai_read_columns_.empty())return ret;
+  OZ (session->get_sys_variable(share::SYS_VAR_AI_COLUMN_STRICT_READ,strict));
+  if(OB_FAIL(ret)||strict.get_int()==0)return ret;
+  auto quote=[](const ObString &name){std::string s="`";for(int i=0;i<name.length();++i){if(name[i]=='`')s+='`';s+=name[i];}return s+'`';};
+  auto *guard=ctx.get_sql_ctx()->schema_guard_;
+  AiColumnSql connection;
+  OZ (connection.init(session));
+  for(int64_t i=0;OB_SUCC(ret)&&i+1<plan.ai_read_columns_.count();i+=2){
+    const auto table_id=plan.ai_read_columns_.at(i),column_id=plan.ai_read_columns_.at(i+1);
+    const share::schema::ObTableSchema *table=nullptr;const share::schema::ObDatabaseSchema *database=nullptr;
+    OZ (guard->get_table_schema(table_id,table));
+    const auto *column=table?table->get_column_schema(column_id):nullptr;
+    if(OB_FAIL(ret)||!column||!column->is_ai_column())continue;
+    OZ (guard->get_database_schema(table->get_database_id(),database));
+    share::AiColumnDefinition definition;const auto &info=column->get_ai_column_info();
+    if(OB_SUCC(ret)&&!share::AiColumnDefinition::decode(std::string(info.ptr(),info.length()),definition))ret=OB_ERR_UNEXPECTED;
+    if(OB_FAIL(ret)||!database)break;
+    const auto *state=table->get_column_schema(definition.state_column_id);if(!state){ret=OB_ERR_UNEXPECTED;break;}
+    std::string query="SELECT 1 FROM "+quote(database->get_database_name_str())+"."+quote(table->get_table_name_str())+
+      " WHERE COALESCE("+quote(state->get_column_name_str())+",'PENDING')<>'READY' LIMIT 1";
+    common::ObISQLClient::ReadResult result;
+    OZ (connection.get()->execute_read(ObString(query.size(),query.data()),result));
+    if(OB_SUCC(ret)){
+      if(!result.get_result())ret=OB_ERR_UNEXPECTED;
+      else {int rc=result.get_result()->next();
+        if(rc==OB_SUCCESS){ret=OB_AI_COLUMN_UNFINISHED;LOG_USER_ERROR(OB_AI_COLUMN_UNFINISHED,table_id,column_id);}
+        else if(rc!=OB_ITER_END)ret=rc;
+      }
+    }
+  }
+  return connection.finish(ret);
+}
+
+}}
+
 OB_INLINE int ObResultSet::do_open_plan(ObExecContext &ctx)
 {
   ObPhysicalPlan* physical_plan_ = static_cast<ObPhysicalPlan*>(cache_obj_guard_.get_cache_obj());
@@ -462,6 +504,7 @@ OB_INLINE int ObResultSet::do_open_plan(ObExecContext &ctx)
 
   if (OB_FAIL(ret)) {
   } else if (OB_FAIL(start_stmt())) {
+  } else if (OB_FAIL(check_ai_column_reads(ctx,*physical_plan_))) {
   } else {
     /* Set exec_result_ to the executor's runtime environment for returning data */
     /* execute plan,

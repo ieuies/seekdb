@@ -21,6 +21,7 @@
 
 #include "sql/resolver/ddl/ob_fts_index_builder_util.h"
 
+#include "share/ai_service/ai_column_definition.h"
 namespace oceanbase
 {
 namespace share
@@ -208,6 +209,12 @@ int ObSchemaPrinter::print_table_definition_columns(const ObTableSchema &table_s
           if (OB_FAIL(databuff_printf(buf, buf_len, pos, " INVISIBLE"))) {
           }
         }
+        if (OB_SUCC(ret) && col->is_ai_column()) {
+          share::AiColumnDefinition definition;
+          const auto &info=col->get_ai_column_info();
+          if(!share::AiColumnDefinition::decode(std::string(info.ptr(),info.length()),definition))ret=OB_ERR_UNEXPECTED;
+          else ret=databuff_printf(buf,buf_len,pos," AI COLUMN (%s) WITH (sync_mode='async', max_retries=%ld)",definition.expression.c_str(),definition.max_retries);
+        }
         if (OB_SUCC(ret) && col->is_generated_column()) {
           if (OB_FAIL(print_generated_column_definition(*col, buf, buf_len, table_schema, pos))) {
           }
@@ -231,7 +238,7 @@ int ObSchemaPrinter::print_table_definition_columns(const ObTableSchema &table_s
             SHARE_SCHEMA_LOG(WARN, "fail to print geometry srid", K(ret), K(srid));
           }
         }
-        if (OB_SUCC(ret) && !col->is_generated_column()) {
+        if (OB_SUCC(ret) && !col->is_generated_column() && !col->is_ai_column()) {
           //if column is not permit null and default value does not specify , don't  display DEFAULT NULL
           if (OB_SUCC(ret)) {
             if (!(ObNullType == col->get_cur_default_value().get_type() && !col->is_nullable())

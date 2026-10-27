@@ -31,6 +31,7 @@ int ObCodeGenerator::generate(const ObLogPlan &log_plan,
 {
   int ret = OB_SUCCESS;
   int64_t batch_size = 0;
+  OZ (phy_plan.ai_read_columns_.assign(log_plan.get_stmt()->get_query_ctx()->ai_read_columns_));
   OZ(detect_batch_size(log_plan, batch_size));
   if (OB_SUCC(ret) && batch_size > 0) {
     log_plan.get_optimizer_context().set_batch_size(batch_size);

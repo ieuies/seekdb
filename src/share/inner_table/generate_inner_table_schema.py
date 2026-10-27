@@ -2732,9 +2732,35 @@ def start_generate_misc_data(fname):
   return f
 
 
+def snapshot_generated_outputs():
+  # CMake/Ninja must not rebuild every schema consumer when only one generated
+  # implementation changes. Keep timestamps for byte-identical outputs.
+  import hashlib
+  previous = {}
+  for directory in (share_output_dir, observer_output_dir):
+    for root, _, files in os.walk(directory):
+      for name in files:
+        path = os.path.join(root, name)
+        if name.endswith(('.h', '.cpp', '.ipp')):
+          with open(path, 'rb') as stream:
+            previous[path] = (os.stat(path), hashlib.sha256(stream.read()).digest())
+  return previous
+
+
+def preserve_unchanged_output_times(previous):
+  import hashlib
+  for path, (info, digest) in previous.items():
+    if os.path.isfile(path):
+      with open(path, 'rb') as stream:
+        unchanged = hashlib.sha256(stream.read()).digest() == digest
+      if unchanged:
+        os.utime(path, ns=(info.st_atime_ns, info.st_mtime_ns))
+
+
 if __name__ == "__main__":
   args = parse_args(sys.argv[1:])
   configure_paths(args)
+  previous_outputs = snapshot_generated_outputs()
   global ob_virtual_index_table_id
   ob_virtual_index_table_id = max_ob_virtual_table_id - 1
   ora_virtual_index_table_id = max_ora_virtual_table_id - 1
@@ -2767,4 +2793,5 @@ if __name__ == "__main__":
   generate_local_table_schema()
   generate_local_virtual_table_cpp_files()
   validate_expected_outputs(args.expected_output)
+  preserve_unchanged_output_times(previous_outputs)
   log_info("Successfully generate C++ files for local virtual tables.")

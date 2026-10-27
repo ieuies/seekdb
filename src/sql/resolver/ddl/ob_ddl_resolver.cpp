@@ -16,6 +16,9 @@
 
 #define USING_LOG_PREFIX SQL_RESV
 #include "config_bridge.h"
+#include "share/ai_service/ai_column_definition.h"
+#include <functional>
+#include <algorithm>
 #include "ob_ddl_resolver.h"
 #include "data_plane/blocksstable/ob_index_block_util.h"
 #include "sql/resolver/dml/ob_dml_resolver.h"
@@ -1762,6 +1765,105 @@ int ObDDLResolver::resolve_column_name(ObColumnSchemaV2 &column,
   return ret;
 }
 
+
+int ObDDLResolver::resolve_ai_column_definition(ObColumnSchemaV2 &column,const ParseNode &node)
+{
+  int ret=OB_SUCCESS;
+  const ParseNode *expression=node.children_[4];
+  if(expression==nullptr || expression->type_!=T_FUN_SYS || expression->num_child_!=2 || expression->children_[0]==nullptr || expression->children_[1]==nullptr) {
+    LOG_USER_ERROR(OB_NOT_SUPPORTED,"AI COLUMN requires AI_COMPLETE or AI_EMBED");return OB_NOT_SUPPORTED;
+  }
+  const auto *name=expression->children_[0];const auto *args=expression->children_[1];
+  std::string function(name->str_value_,name->str_len_);std::transform(function.begin(),function.end(),function.begin(),::tolower);
+  bool embed=function=="ai_embed";
+  if((function!="ai_complete"&&!embed)||args->num_child_<2||args->num_child_>3 ||args->children_[0]->type_!=T_VARCHAR)return OB_NOT_SUPPORTED;
+  share::AiColumnDefinition definition;
+  definition.expression.assign(expression->str_value_,expression->str_len_);
+  definition.definition_version=ObTimeUtility::current_time();
+  const ParseNode *options=node.children_[5];std::vector<std::string> seen;
+  for(int64_t i=0;options && OB_SUCC(ret) && i<options->num_child_;++i){
+    const ParseNode *arg=options->children_[i];if(!arg||arg->type_!=T_OP_EQ||arg->num_child_!=2)return OB_INVALID_ARGUMENT;
+    const ParseNode *key=arg->children_[0],*value=arg->children_[1];
+    if(key&&key->type_==T_COLUMN_REF&&key->num_child_==3)key=key->children_[2];
+    if(!key||!value||!key->str_value_)return OB_INVALID_ARGUMENT;
+    std::string option(key->str_value_,key->str_len_);std::transform(option.begin(),option.end(),option.begin(),::tolower);
+    if(std::find(seen.begin(),seen.end(),option)!=seen.end())return OB_INVALID_ARGUMENT;seen.push_back(option);
+    if(option=="sync_mode" && value->type_==T_VARCHAR && ObString(value->str_len_,value->str_value_).case_compare("async")==0){}
+    else if(option=="max_retries" && value->type_==T_INT && value->value_>=0 && value->value_<=100)definition.max_retries=static_cast<int>(value->value_);
+    else return OB_NOT_SUPPORTED;
+  }
+  std::function<int(const ParseNode *)> collect=[&](const ParseNode *p)->int {
+    if(!p)return OB_SUCCESS;
+    if(p->type_==T_SELECT || p->type_==T_QUESTIONMARK || p->type_==T_OP_GET_USER_VAR || p->type_==T_OP_GET_SYS_VAR)return OB_NOT_SUPPORTED;
+    if(p->type_==T_COLUMN_REF){
+      const ParseNode *column_name=p->num_child_==3?p->children_[2]:nullptr;
+      if(!column_name || p->children_[0] || p->children_[1])return OB_NOT_SUPPORTED;
+      std::string dependency(column_name->str_value_,column_name->str_len_);
+      if(std::find(definition.dependencies.begin(),definition.dependencies.end(),dependency)==definition.dependencies.end())definition.dependencies.push_back(dependency);
+      return OB_SUCCESS;
+    }
+    if(p!=expression && p->type_==T_FUN_SYS && p->children_[0]){
+      std::string f(p->children_[0]->str_value_,p->children_[0]->str_len_);std::transform(f.begin(),f.end(),f.begin(),::tolower);
+      if(f=="ai_complete"||f=="ai_embed"||f=="ai_rerank"||f=="rand"||f=="uuid"||f=="now"||f=="sleep")return OB_NOT_SUPPORTED;
+    }
+    for(int64_t i=0;i<p->num_child_;++i){int e=collect(p->children_[i]);if(e!=OB_SUCCESS)return e;}return OB_SUCCESS;
+  };
+  OZ (collect(expression));
+  const share::schema::ObAiModelSchema *model=nullptr;
+  const auto *model_node=args->children_[0];
+  OZ (schema_checker_->get_schema_guard()->get_ai_model_schema(ObString(model_node->str_len_,model_node->str_value_),model));
+  if(OB_SUCC(ret) && (model==nullptr || model->get_type()!=(embed?share::EndpointType::DENSE_EMBEDDING:share::EndpointType::COMPLETION)))ret=OB_NOT_SUPPORTED;
+  const ParseNode *type=node.children_[1];
+  if(embed){
+    if(type->type_!=T_COLLECTION||type->int32_values_[0]!=1||type->num_child_!=1||!type->children_[0])return OB_NOT_SUPPORTED;
+    definition.vector_dimension=static_cast<int>(type->children_[0]->value_);
+    if(args->num_child_==3 && (args->children_[2]->type_!=T_INT || args->children_[2]->value_!=definition.vector_dimension)) {
+      LOG_USER_ERROR(OB_ERR_INVALID_VECTOR_DIM,static_cast<unsigned>(definition.vector_dimension),static_cast<unsigned>(args->children_[2]->value_));
+      return OB_ERR_INVALID_VECTOR_DIM;
+    }
+    auto parts=share::ai_sql_arguments(definition.expression);if(parts.size()<2)return OB_INVALID_ARGUMENT;
+    definition.normalized_expression="AI_EMBED("+parts[0]+","+parts[1]+","+std::to_string(definition.vector_dimension)+")";
+  }else{
+    auto parts=share::ai_sql_arguments(definition.expression);if(parts.size()<2)return OB_INVALID_ARGUMENT;
+    const char *prompt=column.is_json()?"Return exactly one valid JSON value.":ob_is_integer_type(column.get_data_type())?"Return exactly one base-10 integer, without explanation.":ob_is_numeric_type(column.get_data_type())?"Return exactly one finite number, without explanation.":"Return only the requested text, without explanation.";
+    definition.normalized_expression="AI_COMPLETE("+parts[0]+","+parts[1]+",JSON_SET("+(parts.size()==3?parts[2]:"JSON_OBJECT()")+",'$.seekdb_ai_column_system_prompt','"+prompt+"'))";
+  }
+  if(OB_SUCC(ret)){
+    std::string info=definition.encode();OZ (column.set_ai_column_info(ObString(static_cast<int32_t>(info.size()),info.data())));
+    column.set_nullable(true);
+  }
+  return ret;
+}
+
+int ObDDLResolver::finalize_ai_columns(ObTableSchema &table,uint64_t &max_column_id)
+{
+  int ret=OB_SUCCESS;std::vector<uint64_t> columns;
+  for(int64_t i=0;i<table.get_column_count();++i){const auto *c=table.get_column_schema_by_idx(i);if(c->is_ai_column())columns.push_back(c->get_column_id());}
+  for(auto column_id:columns){
+    auto *column=table.get_column_schema(column_id);const auto &info=column->get_ai_column_info();share::AiColumnDefinition definition;
+    if(!share::AiColumnDefinition::decode(std::string(info.ptr(),info.length()),definition))return OB_INVALID_ARGUMENT;
+    definition.dependency_ids.clear();
+    for(const auto &name:definition.dependencies){const auto *dependency=table.get_column_schema(ObString(static_cast<int32_t>(name.size()),name.data()));
+      if(!dependency)return OB_ERR_BAD_FIELD_ERROR;
+      if(dependency->is_ai_column()||dependency->is_generated_column())return OB_NOT_SUPPORTED;
+      definition.dependency_ids.push_back(dependency->get_column_id());
+    }
+    if(definition.state_column_id!=0)continue;
+    uint64_t ids[3];
+    for(int i=0;OB_SUCC(ret)&&i<3;++i){
+      ObColumnSchemaV2 hidden;hidden.set_table_id(table.get_table_id());hidden.set_column_id(++max_column_id);hidden.set_data_type(ObVarcharType);
+      hidden.set_data_length(i==0?16:i==1?64:4096);hidden.set_collation_type(CS_TYPE_UTF8MB4_BIN);hidden.set_nullable(true);hidden.set_is_hidden(true);
+      std::string name="__ai_"+std::to_string(column_id)+(i==0?"_state":i==1?"_request":"_spec");
+      OZ (hidden.set_column_name(ObString(static_cast<int32_t>(name.size()),name.data())));
+      ids[i]=hidden.get_column_id();OZ (table.add_column(hidden));
+    }
+    definition.state_column_id=ids[0];definition.request_column_id=ids[1];definition.result_spec_column_id=ids[2];
+    column=table.get_column_schema(column_id);std::string encoded=definition.encode();
+    OZ (column->set_ai_column_info(ObString(static_cast<int32_t>(encoded.size()),encoded.data())));
+  }
+  table.set_max_used_column_id(max_column_id);return ret;
+}
+
 int ObDDLResolver::resolve_column_definition(ObColumnSchemaV2 &column,
                                              ParseNode *node, /* column_definition */
                                              ObColumnResolveStat &resolve_stat,
@@ -1966,6 +2068,7 @@ int ObDDLResolver::resolve_column_definition(ObColumnSchemaV2 &column,
       }
     }
   }
+  if (OB_SUCC(ret) && node->num_child_ == 6 && node->value_ == 1) { ret = resolve_ai_column_definition(column,*node); }
   return ret;
 }
 

@@ -25,6 +25,7 @@
 #include "sql/session/ob_local_session_var.h"
 #include "query/command/ob_root_command_service.h"
 #include "query/vector/ob_vector_index_util.h"
+#include "share/ai_service/ai_column_definition.h"
 
 namespace oceanbase
 {
@@ -3455,9 +3456,29 @@ int ObAlterTableResolver::resolve_add_column(const ParseNode &node, ObColumnName
 
         //add column
         if (OB_SUCC(ret)) {
-          if (OB_FAIL(alter_table_stmt->add_column(alter_column_schema))) {
-          } else if (FALSE_IT(alter_table_stmt->set_sql_mode(session_info_->get_sql_mode()))) {
+          if (alter_column_schema.is_ai_column()) {
+            ObTableSchema complete;
+            OZ (complete.assign(*table_schema_));
+            uint64_t next_id=complete.get_max_used_column_id();
+            const auto &pending=alter_table_stmt->get_alter_table_schema();
+            for(auto iter=pending.column_begin();OB_SUCC(ret)&&iter!=pending.column_end();++iter){
+              ObColumnSchemaV2 prior;OZ (prior.assign(**iter));prior.set_column_id(++next_id);OZ (complete.add_column(prior));
+            }
+            alter_column_schema.set_column_id(++next_id);
+            OZ (complete.add_column(alter_column_schema));
+            OZ (finalize_ai_columns(complete,next_id));
+            if(OB_SUCC(ret))OZ (alter_column_schema.set_ai_column_info(complete.get_column_schema(alter_column_schema.get_column_id())->get_ai_column_info()));
+            OZ (alter_table_stmt->add_column(alter_column_schema));
+            for(auto iter=complete.column_begin();OB_SUCC(ret)&&iter!=complete.column_end();++iter){
+              if((*iter)->get_column_id()>alter_column_schema.get_column_id()){
+                AlterColumnSchema hidden;OZ (hidden.ObColumnSchemaV2::assign(**iter));hidden.alter_type_=OB_DDL_ADD_COLUMN;
+                OZ (alter_table_stmt->add_column(hidden));
+              }
+            }
+          } else {
+            OZ (alter_table_stmt->add_column(alter_column_schema));
           }
+          if(OB_SUCC(ret))alter_table_stmt->set_sql_mode(session_info_->get_sql_mode());
         }
       }
     }
@@ -4075,6 +4096,23 @@ int ObAlterTableResolver::resolve_modify_column(const ParseNode &node,
         }
         if (OB_SUCC(ret)) {
           if (OB_FAIL(check_column_in_part_key(*table_schema_, *origin_col_schema, alter_column_schema))) {
+          }
+        }
+        if(OB_SUCC(ret)&&origin_col_schema->is_ai_column()){
+          if(!alter_column_schema.is_ai_column())OZ (alter_column_schema.set_ai_column_info(origin_col_schema->get_ai_column_info()));
+          else {
+            share::AiColumnDefinition old_definition,definition;
+            const auto &old_info=origin_col_schema->get_ai_column_info(),&new_info=alter_column_schema.get_ai_column_info();
+            if(!share::AiColumnDefinition::decode(std::string(old_info.ptr(),old_info.length()),old_definition)||
+               !share::AiColumnDefinition::decode(std::string(new_info.ptr(),new_info.length()),definition))ret=OB_ERR_UNEXPECTED;
+            else {
+              definition.state_column_id=old_definition.state_column_id;definition.request_column_id=old_definition.request_column_id;
+              definition.result_spec_column_id=old_definition.result_spec_column_id;
+              for(const auto &name:definition.dependencies){const auto *dependency=table_schema_->get_column_schema(ObString(name.size(),name.data()));
+                if(!dependency||dependency->is_ai_column()||dependency->is_generated_column())ret=OB_NOT_SUPPORTED;
+                else definition.dependency_ids.push_back(dependency->get_column_id());}
+              std::string encoded=definition.encode();OZ (alter_column_schema.set_ai_column_info(ObString(encoded.size(),encoded.data())));
+            }
           }
         }
         if (OB_SUCC(ret)) {

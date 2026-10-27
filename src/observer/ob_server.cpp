@@ -39,6 +39,7 @@
 #include "storage/lob/ob_lob_manager.h"
 #include "storage/compaction/ob_freeze_info_mgr.h"
 #include "share/ob_freeze_info_proxy.h"
+#include "observer/ai_service/ai_column_worker.h"
 namespace oceanbase { namespace observer { common::ObILobReadService * ObServer::lob_read_service() { return mods_lob_manager_; }
 int ObServer::get_lower_bound_freeze_info(const int64_t snapshot_version, share::ObFreezeInfo &freeze_info) { return OB_ISNULL(mods_freeze_info_mgr_) ? common::OB_NOT_INIT : mods_freeze_info_mgr_->get_lower_bound_freeze_info_before_snapshot_version(snapshot_version, freeze_info); } } }
 #include "rootserver/ob_local_ddl_serial_call.h"
@@ -1348,6 +1349,8 @@ int ObServer::start()
     set_stop();
   } else if (!stop_) {
     GCTX.status_ = SS_SERVING;
+    AiColumnWorker::instance().set_run_wrapper(share::server_runtime());
+    if(OB_FAIL(AiColumnWorker::instance().start()))LOG_ERROR("AI column worker failed to start",K(ret));
     GCTX.start_service_time_ = start_service_time;
     FLOG_INFO("[OBSERVER_NOTICE] observer start service", "start_service_time", GCTX.start_service_time_);
     LOG_DBA_INFO_V2(OB_SERVER_START_SUCCESS,
@@ -1551,6 +1554,8 @@ int ObServer::stop()
 {
   int ret = OB_SUCCESS;
   int fail_ret = OB_SUCCESS;
+  AiColumnWorker::instance().stop();
+  AiColumnWorker::instance().wait();
   FLOG_INFO("[OBSERVER_NOTICE] stop observer begin");
   LOG_DBA_INFO_V2(OB_SERVER_STOP_BEGIN, "observer stop begin.");
 

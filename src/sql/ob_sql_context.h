@@ -550,6 +550,7 @@ public:
 struct ObQueryCtx
 {
 public:
+  common::ObSEArray<uint64_t,4> ai_read_columns_;
   ObQueryCtx()
     : question_marks_count_(0),
       calculable_items_(),
@@ -596,6 +597,7 @@ public:
   {
     question_marks_count_ = 0;
     calculable_items_.reset();
+    ai_read_columns_.reset();
     fetch_cur_time_ = true;
     is_contain_virtual_table_ = false;
     is_contain_inner_table_ = false;

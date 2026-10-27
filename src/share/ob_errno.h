@@ -1212,6 +1212,7 @@ constexpr int OB_AI_FUNC_PARAM_VALUE_INVALID = -11116;
 constexpr int OB_AI_FUNC_PARAM_TYPE_INVALID = -11117;
 constexpr int OB_AI_FUNC_MODEL_NOT_FOUND = -11118;
 constexpr int OB_AI_FUNC_MODEL_EXISTS = -11119;
+constexpr int OB_AI_COLUMN_UNFINISHED = -11120;
 constexpr int OB_CLOB_ONLY_SUPPORT_WITH_MULTIBYTE_FUN = -22998;
 constexpr int OB_ERR_UPDATE_TWICE = -30926;
 constexpr int OB_ERR_SNAPSHOT_QUERY_WITH_UPDATE = -32491;
@@ -2790,3 +2791,5 @@ extern int g_all_ob_errnos[1545];
 } // end namespace oceanbase
 
 #endif //OCEANBASE_LIB_OB_ERRNO_H_
+
+#define OB_AI_COLUMN_UNFINISHED__USER_ERROR_MSG "AI column has unfinished tasks for table_id=%lu, column_id=%lu"

@@ -123,6 +123,7 @@ ObPhysicalPlan::~ObPhysicalPlan()
 void ObPhysicalPlan::reset()
 {
   ObPlanCacheObject::reset();
+  ai_read_columns_.reset();
   phy_hint_.reset();
   root_op_spec_ = NULL;
   param_count_ = 0;
@@ -159,6 +160,7 @@ void ObPhysicalPlan::reset()
   is_update_uniq_index_ = false;
   contain_index_location_ = false;
   ObPlanCacheObject::reset();
+  ai_read_columns_.reset();
   is_late_materialized_ = false;
   is_plain_insert_ = false;
   base_constraints_.reset();
@@ -649,7 +651,7 @@ OB_SERIALIZE_MEMBER(ObPhysicalPlan,
                     need_switch_to_table_lock_worker_,
                     data_complement_gen_doc_id_,
                     px_parallel_rule_,
-                    px_worker_share_plan_enabled_);
+                    px_worker_share_plan_enabled_, ai_read_columns_);
 
 int ObPhysicalPlan::set_table_locations(const ObTablePartitionInfoArray &infos,
                                         ObSchemaGetterGuard &schema_guard)
