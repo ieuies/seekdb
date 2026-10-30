@@ -14,6 +14,9 @@ MIRRORS=(
 )
 
 mkdir -p "$WORK/files"
+# The source tree is where the notebook was started from, remember it before
+# moving into the download directory.
+ORIG_CWD=$(pwd)
 cd "$WORK/files"
 
 fetch() {   # $1 = 仓库内路径
@@ -53,7 +56,7 @@ fi
 ls -la
 echo
 echo "=== 落位到 seekdb 源码树 ==="
-SRC_DIR=${SRC_DIR:-$(pwd)}
+SRC_DIR=${SRC_DIR:-$ORIG_CWD}
 while [ "$SRC_DIR" != "/" ] && [ ! -f "$SRC_DIR/tools/hipvs_bridge/seekdb_cuvs_bridge.c" ]; do
   SRC_DIR=$(dirname "$SRC_DIR")
 done
