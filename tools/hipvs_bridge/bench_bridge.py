@@ -68,7 +68,22 @@ def run_sql(sql, port):
            "--default-character-set=utf8mb4", "-e", sql]
     out = subprocess.run(cmd, capture_output=True, text=True)
     if out.returncode != 0:
-        raise RuntimeError("sql failed: %s\n%s" % (sql, out.stderr))
+        raise RuntimeError("sql failed: %s\n%s" % (sql[:200], out.stderr))
+    rows = []
+    for line in out.stdout.splitlines():
+        if line.strip():
+            rows.append(line.split("\t"))
+    return rows
+
+
+def run_sql_stream(sql_text, port):
+    """Large statements go through stdin. A batch of vectors is far too long for
+    the command line, the argument list limit would be hit first."""
+    cmd = ["mysql", "-h127.0.0.1", "-P%d" % port, "-uroot", "-N", "-s", "-A",
+           "--default-character-set=utf8mb4"]
+    out = subprocess.run(cmd, input=sql_text, capture_output=True, text=True)
+    if out.returncode != 0:
+        raise RuntimeError("sql failed (stream): %s" % out.stderr[:400])
     rows = []
     for line in out.stdout.splitlines():
         if line.strip():
@@ -120,13 +135,16 @@ def main():
             # Fill the table with a deterministic set of vectors.
             import random
             rng = random.Random(20261030)
-            batch = 1000
+            batch = 500
             t0 = time.time()
             for start in range(0, args.rows, batch):
                 values = ",".join(
                     "(%d,'[%s]')" % (i, ",".join("%.6f" % rng.random() for _ in range(args.dim)))
                     for i in range(start, min(start + batch, args.rows)))
-                run_sql("insert into t values %s;" % values, args.port)
+                run_sql_stream("insert into t values %s;" % values, args.port)
+                if start % 10000 == 0:
+                    print("  loaded %d/%d rows in %.1fs"
+                          % (start, args.rows, time.time() - t0), flush=True)
             print("loaded %d rows in %.1fs" % (args.rows, time.time() - t0), flush=True)
 
             # The scored build window starts at the index DDL.
